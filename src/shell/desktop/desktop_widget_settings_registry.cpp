@@ -480,6 +480,7 @@ namespace desktop_settings {
       add(boolSpec("show_unlock_hint", true));
       add(boolSpec("show_caps_lock", true));
       add(boolSpec("show_keyboard_layout", true));
+      add(boolSpec("show_virtual_keyboard", false));
       add(doubleSpec("input_opacity", 1.0, 0.0, 1.0, 0.01));
       add(intSpec("input_radius", 6.0, 0.0, 32.0, 1.0));
       add(boolSpec("center_password_text", false));

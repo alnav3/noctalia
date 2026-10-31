@@ -40,6 +40,7 @@
 #include <tuple>
 #include <utility>
 #include <wayland-client-core.h>
+#include <xkbcommon/xkbcommon.h>
 
 namespace {
 
@@ -529,6 +530,19 @@ LockSurface::LockSurface(WaylandConnection& connection, ConfigService* config) :
 
   m_loginContentRow->addChild(
       ui::button({
+          .out = &m_virtualKeyboardButton,
+          .text = "",
+          .glyph = "keyboard-show",
+          .glyphSize = 16.0F,
+          .variant = ButtonVariant::Ghost,
+          .visible = false,
+          .onClick = [this] { toggleVirtualKeyboard(); },
+          .configure = [](Button& button) { button.setZIndex(2); },
+      })
+  );
+
+  m_loginContentRow->addChild(
+      ui::button({
           .out = &m_loginButton,
           .text = "",
           .glyph = "check",
@@ -565,6 +579,16 @@ LockSurface::LockSurface(WaylandConnection& connection, ConfigService* config) :
     transitionCover->setZIndex(1000);
     m_transitionCover = static_cast<LockscreenTransitionCover*>(m_root.addChild(std::move(transitionCover)));
   }
+
+  m_virtualKeyboard.create(
+      m_root,
+      {
+          .onText = [this](std::string_view text) { typeVirtualKeyboardText(text); },
+          .onBackspace = [this] { sendVirtualKey(XKB_KEY_BackSpace, 0); },
+          .onEnter = [this] { sendVirtualKey(XKB_KEY_Return, 0); },
+          .onInteraction = [this] { focusPasswordField(); },
+      }
+  );
 
   m_inputDispatcher.setSceneRoot(&m_root);
   m_inputDispatcher.setCursorShapeCallback([this](std::uint32_t serial, std::uint32_t shape) {
@@ -677,8 +701,15 @@ void LockSurface::setLockedState(bool locked) {
     if (m_passwordRevealButton != nullptr) {
       m_passwordRevealButton->setGlyph("eye");
     }
+    m_virtualKeyboard.resetState();
+    m_virtualKeyboardVisible = false;
+    // Start hidden on every lock; the keyboard only opens from its toggle button.
+    m_virtualKeyboardUserHidden = true;
     focusPasswordField();
   } else {
+    m_virtualKeyboardVisible = false;
+    m_virtualKeyboardUserHidden = true;
+    m_virtualKeyboard.setVisible(false);
     m_inputDispatcher.setFocus(nullptr);
   }
   requestUpdate();
@@ -693,6 +724,53 @@ void LockSurface::focusPasswordField() {
     return;
   }
   m_inputDispatcher.setFocus(m_passwordField->inputArea());
+}
+
+void LockSurface::toggleVirtualKeyboard() {
+  if (!m_locked || m_blackout) {
+    return;
+  }
+  if (m_virtualKeyboardVisible) {
+    m_virtualKeyboardVisible = false;
+    m_virtualKeyboardUserHidden = true;
+  } else {
+    m_virtualKeyboardVisible = true;
+    m_virtualKeyboardUserHidden = false;
+  }
+  focusPasswordField();
+  requestLayout();
+}
+
+void LockSurface::sendVirtualKey(std::uint32_t sym, std::uint32_t utf32) {
+  if (!m_locked || m_blackout || m_authenticating || m_passwordField == nullptr) {
+    return;
+  }
+  focusPasswordField();
+  m_inputDispatcher.keyEvent(sym, utf32, 0, true);
+  m_inputDispatcher.keyEvent(sym, utf32, 0, false);
+}
+
+void LockSurface::typeVirtualKeyboardText(std::string_view text) {
+  if (text.empty()) {
+    return;
+  }
+  // Keys are single UTF-8 code points; decode the first one and ignore the rest.
+  const auto lead = static_cast<unsigned char>(text.front());
+  std::uint32_t codepoint = lead;
+  if ((lead & 0xE0U) == 0xC0U && text.size() >= 2) {
+    codepoint = (lead & 0x1FU) << 6U;
+    codepoint |= static_cast<unsigned char>(text[1]) & 0x3FU;
+  } else if ((lead & 0xF0U) == 0xE0U && text.size() >= 3) {
+    codepoint = (lead & 0x0FU) << 12U;
+    codepoint |= (static_cast<unsigned char>(text[1]) & 0x3FU) << 6U;
+    codepoint |= static_cast<unsigned char>(text[2]) & 0x3FU;
+  } else if ((lead & 0xF8U) == 0xF0U && text.size() >= 4) {
+    codepoint = (lead & 0x07U) << 18U;
+    codepoint |= (static_cast<unsigned char>(text[1]) & 0x3FU) << 12U;
+    codepoint |= (static_cast<unsigned char>(text[2]) & 0x3FU) << 6U;
+    codepoint |= static_cast<unsigned char>(text[3]) & 0x3FU;
+  }
+  sendVirtualKey(xkb_utf32_to_keysym(codepoint), codepoint);
 }
 
 void LockSurface::setPromptState(
@@ -1232,6 +1310,10 @@ void LockSurface::layoutScene(std::uint32_t width, std::uint32_t height) {
     if (m_layoutChip != nullptr) {
       m_layoutChip->setVisible(false);
     }
+    if (m_virtualKeyboardButton != nullptr) {
+      m_virtualKeyboardButton->setVisible(false);
+    }
+    m_virtualKeyboard.setVisible(false);
     if (m_authPanel != nullptr) {
       m_authPanel->setVisible(false);
     }
@@ -1260,6 +1342,33 @@ void LockSurface::layoutScene(std::uint32_t width, std::uint32_t height) {
   }
   m_loginButton->setVisible(loginVisible && loginStyle.showLoginButton);
 
+  const bool keyboardConfigured = loginVisible && loginStyle.showVirtualKeyboard;
+  if (!keyboardConfigured) {
+    m_virtualKeyboardVisible = false;
+  } else if (!m_virtualKeyboardUserHidden) {
+    m_virtualKeyboardVisible = true;
+  }
+  const bool showVirtualKeyboard = keyboardConfigured && m_virtualKeyboardVisible;
+  float keyboardX = 0.0F;
+  float keyboardY = 0.0F;
+  float keyboardWidth = 0.0F;
+  float keyboardHeight = 0.0F;
+  if (showVirtualKeyboard) {
+    keyboardWidth = lockscreen_virtual_keyboard::VirtualKeyboard::resolveWidth(sw);
+    keyboardHeight = lockscreen_virtual_keyboard::VirtualKeyboard::resolveHeight(keyboardWidth);
+    keyboardX = std::round((sw - keyboardWidth) * 0.5F);
+    keyboardY = sh - keyboardHeight - Style::spaceLg;
+  }
+  m_virtualKeyboard.setVisible(showVirtualKeyboard);
+  if (m_virtualKeyboardButton != nullptr) {
+    m_virtualKeyboardButton->setVisible(keyboardConfigured);
+    m_virtualKeyboardButton->setGlyph(showVirtualKeyboard ? "keyboard-hide" : "keyboard-show");
+    m_virtualKeyboardButton->setTooltip(
+        i18n::tr(showVirtualKeyboard ? "lockscreen.virtual-keyboard-hide" : "lockscreen.virtual-keyboard-show")
+    );
+    m_virtualKeyboardButton->setEnabled(!m_authenticating);
+  }
+
   const bool regular = loginVisible && loginStyle.layout == lockscreen_login_box::LayoutMode::Regular;
   ensureLayoutChipInPasswordRow();
   if (regular && loginStyle.showSessionButtons) {
@@ -1284,6 +1393,10 @@ void LockSurface::layoutScene(std::uint32_t width, std::uint32_t height) {
       panelX = cx - panelWidth * 0.5F;
       panelY = cy - panelHeight * 0.5F;
     }
+  }
+
+  if (showVirtualKeyboard) {
+    panelY = std::min(panelY, keyboardY - Style::spaceSm - panelHeight);
   }
 
   panelX = util::clampOrdered(panelX, Style::spaceLg, sw - panelWidth - Style::spaceLg);
@@ -1532,6 +1645,12 @@ void LockSurface::layoutScene(std::uint32_t width, std::uint32_t height) {
     m_passwordRevealButton->setGlyphSize(sessionGlyphSize);
   }
 
+  if (m_virtualKeyboardButton != nullptr) {
+    m_virtualKeyboardButton->setRadius(Style::scaledRadius(loginStyle.inputRadius));
+    m_virtualKeyboardButton->setSize(controlHeight, controlHeight);
+    m_virtualKeyboardButton->setGlyphSize(sessionGlyphSize);
+  }
+
   m_loginPanel->arrange(renderer, LayoutRect{panelX, panelY, panelWidth, panelHeight});
 
   // Auth panel: sibling above/below the login box (flips below when near the top edge).
@@ -1573,6 +1692,10 @@ void LockSurface::layoutScene(std::uint32_t width, std::uint32_t height) {
       m_authPanel->arrange(renderer, LayoutRect{authX, authY, authW, authH});
     }
   }
+
+  if (showVirtualKeyboard) {
+    m_virtualKeyboard.arrange(renderer, keyboardX, keyboardY, keyboardWidth, keyboardHeight);
+  }
   layoutTransitionCover();
   syncTransitionCover();
 }
@@ -1586,6 +1709,10 @@ void LockSurface::updateCopy() {
   if (m_loginButton != nullptr) {
     m_loginButton->setEnabled(!m_authenticating);
   }
+  if (m_virtualKeyboardButton != nullptr) {
+    m_virtualKeyboardButton->setEnabled(!m_authenticating);
+  }
+  m_virtualKeyboard.setEnabled(!m_authenticating);
   for (Button* button : m_sessionButtons) {
     if (button != nullptr) {
       button->setEnabled(!m_authenticating);

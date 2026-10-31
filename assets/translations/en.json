@@ -693,6 +693,7 @@
         "show-seconds": "Second Hand",
         "show-session-buttons": "Session Buttons",
         "show-unlock-hint": "Unlock Hint",
+        "show-virtual-keyboard": "Virtual Keyboard",
         "show-vpn-label": "Show VPN Label",
         "show-wave": "Show Wave",
         "show-weather": "Weather",
@@ -916,6 +917,8 @@
     "password-placeholder": "Password",
     "ready": "Type your password and press Enter.",
     "unlocked": "Unlocked",
+    "virtual-keyboard-hide": "Hide virtual keyboard",
+    "virtual-keyboard-show": "Show virtual keyboard",
     "waiting": "Waiting for lock confirmation…"
   },
   "notifications": {

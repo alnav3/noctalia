@@ -35,6 +35,7 @@ namespace lockscreen_login_box {
   constexpr std::string_view kShowKeyboardLayoutKey = "show_keyboard_layout";
   constexpr std::string_view kShowUnlockHintKey = "show_unlock_hint";
   constexpr std::string_view kShowPasswordRevealKey = "show_password_reveal";
+  constexpr std::string_view kShowVirtualKeyboardKey = "show_virtual_keyboard";
 
   enum class LayoutMode : std::uint8_t {
     Compact,
@@ -53,6 +54,7 @@ namespace lockscreen_login_box {
     bool showCapsLock = true;
     bool showPasswordReveal = true;
     bool showKeyboardLayout = true;
+    bool showVirtualKeyboard = false;
     bool showSessionButtons = true;
     bool showMedia = true;
     bool showWeather = true;

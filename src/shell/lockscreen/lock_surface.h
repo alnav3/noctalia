@@ -11,6 +11,7 @@
 #include "render/scene/input_dispatcher.h"
 #include "render/scene/node.h"
 #include "shell/lockscreen/lockscreen_login_box.h"
+#include "shell/lockscreen/lockscreen_virtual_keyboard.h"
 #include "wayland/surface.h"
 
 #include <array>
@@ -19,6 +20,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_set>
 #include <vector>
 
@@ -153,6 +155,9 @@ private:
   [[nodiscard]] std::string resolveStatusText(const lockscreen_login_box::LoginBoxStyle& style, bool& isError) const;
   [[nodiscard]] bool passwordFieldContainsPoint(float sceneX, float sceneY) const;
   void focusPasswordField();
+  void toggleVirtualKeyboard();
+  void sendVirtualKey(std::uint32_t sym, std::uint32_t utf32);
+  void typeVirtualKeyboardText(std::string_view text);
 
   ext_session_lock_surface_v1* m_lockSurface = nullptr;
   wl_output* m_output = nullptr;
@@ -188,10 +193,14 @@ private:
   Flex* m_loginContentRow = nullptr;
   Input* m_passwordField = nullptr;
   Button* m_passwordRevealButton = nullptr;
+  Button* m_virtualKeyboardButton = nullptr;
   Button* m_loginButton = nullptr;
   Button* m_layoutChip = nullptr;
   Flex* m_sessionRow = nullptr;
   std::vector<Button*> m_sessionButtons;
+  lockscreen_virtual_keyboard::VirtualKeyboard m_virtualKeyboard;
+  bool m_virtualKeyboardVisible = false;
+  bool m_virtualKeyboardUserHidden = false;
   SharedTextureCache* m_textureCache = nullptr;
   SharedTextureCache::Lease m_wallpaperLease;
   SharedTextureCache::Lease m_pendingWallpaperLease;
