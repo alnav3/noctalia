@@ -54,6 +54,7 @@ namespace {
   constexpr float kWeatherGlyphSize = 28.0F;
   constexpr float kForecastGlyphSize = lockscreen_login_box::kRegularForecastGlyphSize;
   constexpr float kLayoutChipMaxWidth = 96.0F;
+  constexpr float kMinPasswordInputWidth = 96.0F;
   constexpr int kForecastDayCountPaired = 3;
   constexpr int kForecastDayCountAlone = 5;
   constexpr float kWeatherCurrentMinText = 56.0F;
@@ -548,12 +549,7 @@ LockSurface::LockSurface(WaylandConnection& connection, ConfigService* config) :
           .glyph = "check",
           .glyphSize = 16.0F,
           .variant = ButtonVariant::Primary,
-          .onClick =
-              [this] {
-                if (m_onLogin) {
-                  m_onLogin();
-                }
-              },
+          .onClick = [this] { submitLogin(); },
           .configure = [](Button& button) { button.setZIndex(2); },
       })
   );
@@ -585,7 +581,7 @@ LockSurface::LockSurface(WaylandConnection& connection, ConfigService* config) :
       {
           .onText = [this](std::string_view text) { typeVirtualKeyboardText(text); },
           .onBackspace = [this] { sendVirtualKey(XKB_KEY_BackSpace, 0); },
-          .onEnter = [this] { sendVirtualKey(XKB_KEY_Return, 0); },
+          .onEnter = [this] { submitLogin(); },
           .onInteraction = [this] { focusPasswordField(); },
       }
   );
@@ -702,13 +698,11 @@ void LockSurface::setLockedState(bool locked) {
       m_passwordRevealButton->setGlyph("eye");
     }
     m_virtualKeyboard.resetState();
-    m_virtualKeyboardVisible = false;
     // Start hidden on every lock; the keyboard only opens from its toggle button.
-    m_virtualKeyboardUserHidden = true;
+    m_virtualKeyboardVisible = false;
     focusPasswordField();
   } else {
     m_virtualKeyboardVisible = false;
-    m_virtualKeyboardUserHidden = true;
     m_virtualKeyboard.setVisible(false);
     m_inputDispatcher.setFocus(nullptr);
   }
@@ -726,16 +720,23 @@ void LockSurface::focusPasswordField() {
   m_inputDispatcher.setFocus(m_passwordField->inputArea());
 }
 
+void LockSurface::submitLogin() {
+  if (!m_locked || m_blackout || m_authenticating) {
+    return;
+  }
+  focusPasswordField();
+  if (m_onLogin) {
+    m_onLogin();
+  }
+}
+
 void LockSurface::toggleVirtualKeyboard() {
   if (!m_locked || m_blackout) {
     return;
   }
-  if (m_virtualKeyboardVisible) {
-    m_virtualKeyboardVisible = false;
-    m_virtualKeyboardUserHidden = true;
-  } else {
-    m_virtualKeyboardVisible = true;
-    m_virtualKeyboardUserHidden = false;
+  m_virtualKeyboardVisible = !m_virtualKeyboardVisible;
+  if (!m_virtualKeyboardVisible) {
+    m_virtualKeyboard.resetState();
   }
   focusPasswordField();
   requestLayout();
@@ -1342,22 +1343,76 @@ void LockSurface::layoutScene(std::uint32_t width, std::uint32_t height) {
   }
   m_loginButton->setVisible(loginVisible && loginStyle.showLoginButton);
 
+  const bool regular = loginVisible && loginStyle.layout == lockscreen_login_box::LayoutMode::Regular;
+  ensureLayoutChipInPasswordRow();
+  if (regular && loginStyle.showSessionButtons) {
+    rebuildSessionButtons();
+  }
+  bool showSession = regular && loginStyle.showSessionButtons && !m_sessionButtons.empty();
+  bool allowInfoExtras = true;
+  bool showInfoConfigured = regular && lockscreen_login_box::styleShowsInfoExtras(loginStyle);
+  float panelHeight = lockscreen_login_box::defaultPanelHeight(loginStyle.layout, showSession, showInfoConfigured);
+  float panelWidth = lockscreen_login_box::defaultPanelWidth(sw, loginStyle.layout);
+  float panelX = 0.0F;
+  float panelY = 0.0F;
+  float configuredCenterX = 0.0F;
+  float configuredCenterY = 0.0F;
+  bool hasConfiguredCenter = false;
+  if (m_config != nullptr) {
+    if (const DesktopWidgetState* loginBox = lockscreen_login_box::findForOutput(
+            m_config->config().lockscreenWidgets.widgets, m_connection.outputs(), m_outputKey
+        );
+        loginBox != nullptr) {
+      configuredCenterX = loginBox->cx;
+      configuredCenterY = loginBox->cy;
+      hasConfiguredCenter = true;
+      panelWidth = lockscreen_login_box::resolvePanelWidth(sw, loginBox->boxWidth, loginStyle.layout);
+    }
+  }
+  const auto placePanel = [&] {
+    if (hasConfiguredCenter) {
+      panelX = configuredCenterX - panelWidth * 0.5F;
+      panelY = configuredCenterY - panelHeight * 0.5F;
+    } else {
+      panelX = std::round((sw - panelWidth) * 0.5F);
+      panelY = std::max(Style::spaceLg, sh - panelHeight - 84.0F);
+    }
+  };
+  placePanel();
+
   const bool keyboardConfigured = loginVisible && loginStyle.showVirtualKeyboard;
   if (!keyboardConfigured) {
+    if (m_virtualKeyboardVisible) {
+      m_virtualKeyboard.resetState();
+    }
     m_virtualKeyboardVisible = false;
-  } else if (!m_virtualKeyboardUserHidden) {
-    m_virtualKeyboardVisible = true;
   }
-  const bool showVirtualKeyboard = keyboardConfigured && m_virtualKeyboardVisible;
+  const bool showVirtualKeyboard = m_locked && keyboardConfigured && m_virtualKeyboardVisible;
   float keyboardX = 0.0F;
   float keyboardY = 0.0F;
   float keyboardWidth = 0.0F;
   float keyboardHeight = 0.0F;
   if (showVirtualKeyboard) {
     keyboardWidth = lockscreen_virtual_keyboard::VirtualKeyboard::resolveWidth(sw);
-    keyboardHeight = lockscreen_virtual_keyboard::VirtualKeyboard::resolveHeight(keyboardWidth);
-    keyboardX = std::round((sw - keyboardWidth) * 0.5F);
-    keyboardY = sh - keyboardHeight - Style::spaceLg;
+    bool statusError = false;
+    const bool authWillShow = m_authPanel != nullptr
+        && m_authLabel != nullptr
+        && m_locked
+        && !m_blackout
+        && loginVisible
+        && !resolveStatusText(loginStyle, statusError).empty();
+    const float authReserve = authWillShow ? 2.0F * Style::spaceMd + Style::fontSizeHeader + Style::spaceSm : 0.0F;
+    const float availableForKeyboard = sh - Style::spaceLg * 2.0F - Style::spaceSm - panelHeight - authReserve;
+    if (regular
+        && (showSession || showInfoConfigured)
+        && availableForKeyboard < lockscreen_virtual_keyboard::VirtualKeyboard::resolveMinHeight(keyboardWidth)) {
+      // Short screens keep the keyboard usable by hiding optional Regular chrome while it is open.
+      showSession = false;
+      allowInfoExtras = false;
+      showInfoConfigured = false;
+      panelHeight = lockscreen_login_box::defaultPanelHeight(loginStyle.layout, showSession, showInfoConfigured);
+      placePanel();
+    }
   }
   m_virtualKeyboard.setVisible(showVirtualKeyboard);
   if (m_virtualKeyboardButton != nullptr) {
@@ -1368,39 +1423,6 @@ void LockSurface::layoutScene(std::uint32_t width, std::uint32_t height) {
     );
     m_virtualKeyboardButton->setEnabled(!m_authenticating);
   }
-
-  const bool regular = loginVisible && loginStyle.layout == lockscreen_login_box::LayoutMode::Regular;
-  ensureLayoutChipInPasswordRow();
-  if (regular && loginStyle.showSessionButtons) {
-    rebuildSessionButtons();
-  }
-  const bool showSession = regular && loginStyle.showSessionButtons && !m_sessionButtons.empty();
-  const bool showInfoConfigured = regular && lockscreen_login_box::styleShowsInfoExtras(loginStyle);
-  float panelHeight = lockscreen_login_box::defaultPanelHeight(loginStyle.layout, showSession, showInfoConfigured);
-  float panelWidth = lockscreen_login_box::defaultPanelWidth(sw, loginStyle.layout);
-  float panelX = std::round((sw - panelWidth) * 0.5F);
-  float panelY = std::max(Style::spaceLg, sh - panelHeight - 84.0F);
-  if (m_config != nullptr) {
-    if (const DesktopWidgetState* loginBox = lockscreen_login_box::findForOutput(
-            m_config->config().lockscreenWidgets.widgets, m_connection.outputs(), m_outputKey
-        );
-        loginBox != nullptr) {
-      float cx = loginBox->cx;
-      float cy = loginBox->cy;
-      // Fit height to visible chrome so disabling media/weather/sessions does not leave empty panel space.
-      panelHeight = lockscreen_login_box::defaultPanelHeight(loginStyle.layout, showSession, showInfoConfigured);
-      panelWidth = lockscreen_login_box::resolvePanelWidth(sw, loginBox->boxWidth, loginStyle.layout);
-      panelX = cx - panelWidth * 0.5F;
-      panelY = cy - panelHeight * 0.5F;
-    }
-  }
-
-  if (showVirtualKeyboard) {
-    panelY = std::min(panelY, keyboardY - Style::spaceSm - panelHeight);
-  }
-
-  panelX = util::clampOrdered(panelX, Style::spaceLg, sw - panelWidth - Style::spaceLg);
-  panelY = util::clampOrdered(panelY, Style::spaceLg, sh - panelHeight - Style::spaceLg);
 
   m_root.setSize(sw, sh);
 
@@ -1450,7 +1472,9 @@ void LockSurface::layoutScene(std::uint32_t width, std::uint32_t height) {
 
   const bool mediaReady = m_mpris != nullptr && m_mpris->activePlayer().has_value();
   const bool weatherReady = m_weather != nullptr && m_weather->enabled() && m_weather->hasData();
-  const auto extras = lockscreen_login_box::resolveInfoExtrasVisibility(regular, loginStyle, mediaReady, weatherReady);
+  const auto extras = lockscreen_login_box::resolveInfoExtrasVisibility(
+      regular && allowInfoExtras, loginStyle, mediaReady, weatherReady
+  );
   const bool showMedia = extras.showMedia;
   const bool showWeather = extras.showWeather;
   const bool showInfoExtras = showMedia || showWeather;
@@ -1461,8 +1485,6 @@ void LockSurface::layoutScene(std::uint32_t width, std::uint32_t height) {
   const int maxForecastDays = weatherAlone ? kForecastDayCountAlone : kForecastDayCountPaired;
   // Placeholder until fonts/glyphs are scaled below; recomputed after contentScale.
   int forecastDaysFit = 0;
-  const bool showLayoutChip =
-      loginVisible && loginStyle.showKeyboardLayout && m_layoutChip != nullptr && m_layoutChip->visible();
 
   const lockscreen_login_box::RegularRowHeights rows = regular
       ? lockscreen_login_box::regularRowHeights(panelHeight, showSession, showInfoExtras)
@@ -1475,6 +1497,61 @@ void LockSurface::layoutScene(std::uint32_t width, std::uint32_t height) {
   const float weatherGlyphSize = kWeatherGlyphSize * contentScale;
   const float forecastGlyphSize = kForecastGlyphSize * contentScale;
   const float sessionGlyphSize = 16.0F * contentScale;
+
+  bool authStatusError = false;
+  std::string authText;
+  bool showAuth = false;
+  float authFontSize = 0.0F;
+  float authPad = 0.0F;
+  float authH = 0.0F;
+  float authY = 0.0F;
+  if (m_authPanel != nullptr && m_authLabel != nullptr) {
+    authText = resolveStatusText(loginStyle, authStatusError);
+    showAuth = m_locked && !m_blackout && loginVisible && !authText.empty();
+    if (showAuth) {
+      authFontSize = captionSize + (regular ? contentScale : 1.0F);
+      authPad = Style::spaceMd * (regular ? contentScale : 1.0F);
+      authH = authPad * 2.0F + authFontSize;
+    }
+  }
+
+  const float authGap = Style::spaceSm;
+  if (showVirtualKeyboard) {
+    const float authBlock = showAuth ? authGap + authH : 0.0F;
+    const float keyboardBudget = sh - Style::spaceLg * 2.0F - Style::spaceSm - panelHeight - authBlock;
+    keyboardHeight = keyboardBudget > 0.0F
+        ? lockscreen_virtual_keyboard::VirtualKeyboard::resolveHeight(keyboardWidth, keyboardBudget)
+        : 0.0F;
+    keyboardX = std::round((sw - keyboardWidth) * 0.5F);
+    keyboardY = sh - keyboardHeight - Style::spaceLg;
+  }
+
+  panelX = util::clampOrdered(panelX, Style::spaceLg, sw - panelWidth - Style::spaceLg);
+  if (showVirtualKeyboard) {
+    const float keyboardTopLimit = keyboardY - Style::spaceSm;
+    panelY = util::clampOrdered(panelY, Style::spaceLg, keyboardTopLimit - panelHeight);
+  } else {
+    panelY = util::clampOrdered(panelY, Style::spaceLg, sh - panelHeight - Style::spaceLg);
+  }
+
+  if (showAuth) {
+    const float authYAbove = panelY - authGap - authH;
+    const float authYBelow = panelY + panelHeight + authGap;
+    if (showVirtualKeyboard) {
+      const float keyboardTop = keyboardY - Style::spaceSm;
+      if (authYAbove >= Style::spaceLg) {
+        authY = authYAbove;
+      } else if (authYBelow + authH <= keyboardTop) {
+        authY = authYBelow;
+      } else {
+        // Anchor the auth card and login panel as a block above the keyboard.
+        panelY = keyboardTop - panelHeight;
+        authY = panelY - authGap - authH;
+      }
+    } else {
+      authY = authYAbove >= Style::spaceLg ? authYAbove : authYBelow;
+    }
+  }
 
   forecastDaysFit = showWeather
       ? fitForecastDays(renderer, weatherBudget, weatherGlyphSize, forecastGlyphSize, captionSize, maxForecastDays)
@@ -1585,6 +1662,39 @@ void LockSurface::layoutScene(std::uint32_t width, std::uint32_t height) {
   }
 
   const float controlHeight = regular ? rows.password : Style::controlHeight;
+  // Drop optional row controls before the password field becomes too narrow to use.
+  bool showReveal = loginVisible && loginStyle.showPasswordReveal && m_passwordRevealButton != nullptr;
+  bool showLayoutChip =
+      m_locked && loginVisible && loginStyle.showKeyboardLayout && m_layoutChip != nullptr && m_hasMultipleLayouts;
+  const bool showLoginButton = loginVisible && loginStyle.showLoginButton;
+  const bool showKeyboardButton = keyboardConfigured && m_virtualKeyboardButton != nullptr;
+  const auto passwordInputWidth = [&](int buttonCount, bool layoutChip) {
+    const int gaps = buttonCount + static_cast<int>(layoutChip);
+    return contentWidth
+        - controlHeight * static_cast<float>(buttonCount)
+        - (layoutChip ? kLayoutChipMaxWidth : 0.0F)
+        - Style::spaceSm * static_cast<float>(gaps);
+  };
+  int passwordButtonCount =
+      static_cast<int>(showReveal) + static_cast<int>(showLoginButton) + static_cast<int>(showKeyboardButton);
+  if (passwordInputWidth(passwordButtonCount, showLayoutChip) < kMinPasswordInputWidth && showReveal) {
+    showReveal = false;
+    --passwordButtonCount;
+  }
+  if (passwordInputWidth(passwordButtonCount, showLayoutChip) < kMinPasswordInputWidth && showLayoutChip) {
+    showLayoutChip = false;
+  }
+
+  if (m_passwordRevealButton != nullptr) {
+    m_passwordRevealButton->setVisible(showReveal);
+    if (!showReveal) {
+      m_passwordField->setPasswordRevealed(false);
+      m_passwordRevealButton->setGlyph("eye");
+    }
+  }
+  if (m_layoutChip != nullptr) {
+    m_layoutChip->setVisible(showLayoutChip);
+  }
   m_loginContentRow->setMinHeight(controlHeight);
   m_loginContentRow->setMaxHeight(controlHeight);
   m_loginContentRow->setMaxWidth(contentWidth);
@@ -1631,7 +1741,6 @@ void LockSurface::layoutScene(std::uint32_t width, std::uint32_t height) {
   m_passwordField->setControlHeight(controlHeight);
   m_passwordField->setFontSize(bodySize);
 
-  const bool showLoginButton = loginVisible && loginStyle.showLoginButton;
   m_loginButton->setVisible(showLoginButton);
   if (showLoginButton) {
     m_loginButton->setRadius(Style::scaledRadius(loginStyle.inputRadius));
@@ -1653,27 +1762,20 @@ void LockSurface::layoutScene(std::uint32_t width, std::uint32_t height) {
 
   m_loginPanel->arrange(renderer, LayoutRect{panelX, panelY, panelWidth, panelHeight});
 
-  // Auth panel: sibling above/below the login box (flips below when near the top edge).
+  // Auth panel: sibling above/below the login box and clear of the keyboard.
   if (m_authPanel != nullptr && m_authLabel != nullptr) {
-    bool statusError = false;
-    const std::string authText = resolveStatusText(loginStyle, statusError);
-    const bool showAuth = m_locked && !m_blackout && loginVisible && !authText.empty();
     m_authPanel->setVisible(showAuth);
     m_authLabel->setVisible(showAuth);
     if (showAuth) {
       m_authLabel->setText(authText);
-      m_authLabel->setColor(colorSpecFromRole(statusError ? ColorRole::Error : ColorRole::OnSurfaceVariant));
-      const float authFontSize = captionSize + (regular ? contentScale : 1.0F);
+      m_authLabel->setColor(colorSpecFromRole(authStatusError ? ColorRole::Error : ColorRole::OnSurfaceVariant));
       m_authLabel->setFontSize(authFontSize);
       m_authLabel->setEllipsize(TextEllipsize::End);
 
-      const float authPadV = Style::spaceMd * (regular ? contentScale : 1.0F);
-      const float authPadH = Style::spaceMd * (regular ? contentScale : 1.0F);
       const float authW = panelWidth;
-      const float authH = authPadV * 2.0F + authFontSize;
-      const float labelMaxW = std::max(0.0F, authW - authPadH * 2.0F);
+      const float labelMaxW = std::max(0.0F, authW - authPad * 2.0F);
 
-      m_authPanel->setPadding(authPadV, authPadH);
+      m_authPanel->setPadding(authPad, authPad);
       m_authPanel->setFill(loginStyle.panelFill);
       m_authPanel->setBorder(colorForRole(ColorRole::OutlineVariant, loginStyle.panelOpacity), Style::borderWidth);
       m_authPanel->setRadius(Style::scaledRadius(loginStyle.panelRadius));
@@ -1684,12 +1786,7 @@ void LockSurface::layoutScene(std::uint32_t width, std::uint32_t height) {
       m_authPanel->setMaxHeight(authH);
       m_authLabel->setMaxWidth(labelMaxW);
 
-      const float authGap = Style::spaceSm;
-      const float authX = panelX;
-      const float authYAbove = panelY - authGap - authH;
-      const float authYBelow = panelY + panelHeight + authGap;
-      const float authY = (authYAbove >= Style::spaceLg) ? authYAbove : authYBelow;
-      m_authPanel->arrange(renderer, LayoutRect{authX, authY, authW, authH});
+      m_authPanel->arrange(renderer, LayoutRect{panelX, authY, authW, authH});
     }
   }
 
@@ -1734,14 +1831,9 @@ void LockSurface::updateCopy() {
   }
 
   if (m_layoutChip != nullptr) {
-    const bool show =
-        m_locked && !m_blackout && style.showKeyboardLayout && m_hasMultipleLayouts && isLoginBoxEnabled();
-    m_layoutChip->setVisible(show);
-    if (show) {
-      m_layoutChip->setGlyph("keyboard");
-      m_layoutChip->setText(m_layoutLabel.empty() ? "—" : m_layoutLabel);
-      m_layoutChip->setEnabled(m_layoutSwitchable);
-    }
+    m_layoutChip->setGlyph("keyboard");
+    m_layoutChip->setText(m_layoutLabel.empty() ? "—" : m_layoutLabel);
+    m_layoutChip->setEnabled(m_layoutSwitchable);
   }
 }
 

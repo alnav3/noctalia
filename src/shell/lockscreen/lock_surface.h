@@ -155,6 +155,7 @@ private:
   [[nodiscard]] std::string resolveStatusText(const lockscreen_login_box::LoginBoxStyle& style, bool& isError) const;
   [[nodiscard]] bool passwordFieldContainsPoint(float sceneX, float sceneY) const;
   void focusPasswordField();
+  void submitLogin();
   void toggleVirtualKeyboard();
   void sendVirtualKey(std::uint32_t sym, std::uint32_t utf32);
   void typeVirtualKeyboardText(std::string_view text);
@@ -200,7 +201,6 @@ private:
   std::vector<Button*> m_sessionButtons;
   lockscreen_virtual_keyboard::VirtualKeyboard m_virtualKeyboard;
   bool m_virtualKeyboardVisible = false;
-  bool m_virtualKeyboardUserHidden = false;
   SharedTextureCache* m_textureCache = nullptr;
   SharedTextureCache::Lease m_wallpaperLease;
   SharedTextureCache::Lease m_pendingWallpaperLease;

@@ -17,30 +17,55 @@ namespace lockscreen_virtual_keyboard {
   namespace {
 
     constexpr float kMaxWidth = 760.0F;
-    constexpr float kMinWidth = 240.0F;
     constexpr float kKeyGap = 6.0F;
+    constexpr float kNarrowKeyGap = 3.0F;
     constexpr float kPanelPadding = 10.0F;
+    constexpr float kNarrowPanelPadding = 4.0F;
     constexpr int kRowCount = 5;
-    constexpr float kMinKeyHeight = 30.0F;
+    constexpr float kMinKeyHeight = 24.0F;
     constexpr float kMaxKeyHeight = 52.0F;
     constexpr float kKeyHeightRatio = 0.78F;
 
+    [[nodiscard]] float keyGapForWidth(float width) { return width < 480.0F ? kNarrowKeyGap : kKeyGap; }
+
+    [[nodiscard]] float panelPaddingForWidth(float width) {
+      return width < 480.0F ? kNarrowPanelPadding : kPanelPadding;
+    }
+
     [[nodiscard]] float keyHeightForWidth(float width) {
-      const float usable = std::max(0.0F, width - kPanelPadding * 2.0F - kKeyGap * 9.0F);
+      const float gap = keyGapForWidth(width);
+      const float padding = panelPaddingForWidth(width);
+      const float usable = std::max(0.0F, width - padding * 2.0F - gap * 9.0F);
       return std::clamp(usable / 10.0F * kKeyHeightRatio, kMinKeyHeight, kMaxKeyHeight);
+    }
+
+    [[nodiscard]] float heightForWidth(float keyHeight, float width) {
+      const float gap = keyGapForWidth(width);
+      const float padding = panelPaddingForWidth(width);
+      return keyHeight * static_cast<float>(kRowCount) + gap * static_cast<float>(kRowCount - 1) + padding * 2.0F;
     }
 
   } // namespace
 
   VirtualKeyboard::VirtualKeyboard() = default;
-  VirtualKeyboard::~VirtualKeyboard() = default;
 
   void VirtualKeyboard::create(Node& parent, Callbacks callbacks) {
+    if (m_parent != nullptr) {
+      return;
+    }
+    m_parent = &parent;
     m_callbacks = std::move(callbacks);
+  }
+
+  void VirtualKeyboard::ensureBuilt() {
+    if (m_panel != nullptr || m_parent == nullptr) {
+      return;
+    }
+
     m_rows.reserve(kRowCount * 2);
-    m_buttons.reserve(80);
-    m_letterKeys.reserve(40);
-    m_symbolKeys.reserve(40);
+    m_buttons.reserve(86);
+    m_letterKeys.reserve(48);
+    m_symbolKeys.reserve(48);
 
     auto panel = ui::flex(
         FlexDirection::Vertical,
@@ -50,9 +75,9 @@ namespace lockscreen_virtual_keyboard {
             .justify = FlexJustify::Start,
             .gap = kKeyGap,
             .padding = kPanelPadding,
-            .fill = colorSpecFromRole(ColorRole::SurfaceContainerHigh, 0.94F),
+            .fill = colorSpecFromRole(ColorRole::SurfaceContainerHigh),
             .radius = Style::scaledRadius(14.0F),
-            .border = colorSpecFromRole(ColorRole::OutlineVariant, 0.85F),
+            .border = colorSpecFromRole(ColorRole::OutlineVariant),
             .borderWidth = Style::borderWidth,
             .widthPolicy = FlexSizePolicy::Fill,
             .heightPolicy = FlexSizePolicy::Fill,
@@ -61,9 +86,13 @@ namespace lockscreen_virtual_keyboard {
             .configure = [](Flex& flex) { flex.setZIndex(5); },
         }
     );
-    parent.addChild(std::move(panel));
+    m_parent->addChild(std::move(panel));
 
     buildPages();
+    syncPageVisibility();
+    updateKeyLabels();
+    setEnabled(m_enabled);
+    m_panel->setVisible(m_visible);
   }
 
   void VirtualKeyboard::buildPages() {
@@ -125,6 +154,7 @@ namespace lockscreen_virtual_keyboard {
     if (!glyph.empty()) {
       glyphName = std::string(glyph);
     }
+    key.glyphOnly = glyphName.has_value();
     auto button = ui::button({
         .out = &key.button,
         .text = glyph.empty() ? key.lower : std::string{},
@@ -134,7 +164,12 @@ namespace lockscreen_virtual_keyboard {
         .maxHeight = 0.0F,
         .padding = 2.0F,
         .flexGrow = weight,
-        .configure = [](Button& control) { control.setMinWidth(0.0F); },
+        .configure = [](Button& control) {
+          control.setMinWidth(0.0F);
+          if (control.inputArea() != nullptr) {
+            control.inputArea()->setFocusable(false);
+          }
+        },
     });
     button->setOnClick([this, &keys, index = keys.size()] { activate(keys, index); });
     m_buttons.push_back(button.get());
@@ -291,14 +326,16 @@ namespace lockscreen_virtual_keyboard {
 
   void VirtualKeyboard::setVisible(bool visible) {
     m_visible = visible;
+    if (visible) {
+      ensureBuilt();
+    }
     if (m_panel != nullptr) {
       m_panel->setVisible(visible);
     }
   }
 
-  bool VirtualKeyboard::visible() const noexcept { return m_visible; }
-
   void VirtualKeyboard::setEnabled(bool enabled) {
+    m_enabled = enabled;
     for (Button* button : m_buttons) {
       if (button != nullptr) {
         button->setEnabled(enabled);
@@ -309,54 +346,96 @@ namespace lockscreen_virtual_keyboard {
   void VirtualKeyboard::resetState() {
     m_shift = false;
     m_symbols = false;
-    if (m_letterPage != nullptr) {
-      m_letterPage->setVisible(true);
+    if (m_panel == nullptr) {
+      return;
     }
-    if (m_symbolPage != nullptr) {
-      m_symbolPage->setVisible(false);
-    }
+    syncPageVisibility();
     updateKeyLabels();
   }
 
-  float VirtualKeyboard::resolveWidth(float screenWidth) {
-    return std::max(kMinWidth, std::min(screenWidth - Style::spaceLg * 2.0F, kMaxWidth));
+  void VirtualKeyboard::syncPageVisibility() {
+    if (m_letterPage != nullptr) {
+      m_letterPage->setVisible(!m_symbols);
+    }
+    if (m_symbolPage != nullptr) {
+      m_symbolPage->setVisible(m_symbols);
+    }
   }
 
-  float VirtualKeyboard::resolveHeight(float width) {
-    const float keyHeight = keyHeightForWidth(width);
-    return keyHeight * static_cast<float>(kRowCount)
-        + kKeyGap * static_cast<float>(kRowCount - 1)
-        + kPanelPadding * 2.0F;
+  float VirtualKeyboard::resolveWidth(float screenWidth) {
+    if (screenWidth <= 0.0F) {
+      return 0.0F;
+    }
+    const float margin = std::clamp(screenWidth * 0.02F, Style::spaceXs, Style::spaceLg);
+    return std::max(0.0F, std::min(screenWidth - margin * 2.0F, kMaxWidth));
   }
+
+  float VirtualKeyboard::resolveHeight(float width, float maxHeight) {
+    const float naturalHeight = heightForWidth(keyHeightForWidth(width), width);
+    if (maxHeight <= 0.0F) {
+      return naturalHeight;
+    }
+    return std::min(naturalHeight, maxHeight);
+  }
+
+  float VirtualKeyboard::resolveMinHeight(float width) { return heightForWidth(kMinKeyHeight, width); }
 
   void VirtualKeyboard::arrange(Renderer& renderer, float x, float y, float width, float height) {
     if (m_panel == nullptr) {
       return;
     }
 
+    const float gap = keyGapForWidth(width);
+    const float padding = panelPaddingForWidth(width);
     const float keyHeight = std::clamp(
-        (height - kPanelPadding * 2.0F - kKeyGap * static_cast<float>(kRowCount - 1)) / static_cast<float>(kRowCount),
-        kMinKeyHeight, kMaxKeyHeight
+        (height - padding * 2.0F - gap * static_cast<float>(kRowCount - 1)) / static_cast<float>(kRowCount), 1.0F,
+        kMaxKeyHeight
     );
-    const float fontSize = std::clamp(keyHeight * 0.36F, 13.0F, 18.0F);
-    const float glyphSize = std::clamp(keyHeight * 0.44F, 15.0F, 20.0F);
+    const float fontSize = std::clamp(keyHeight * 0.36F, 11.0F, 18.0F);
+    const float glyphSize = std::clamp(keyHeight * 0.44F, 13.0F, 20.0F);
     const float keyRadius = std::round(keyHeight * 0.18F);
 
+    m_panel->setGap(gap);
+    m_panel->setPadding(padding);
+    if (m_letterPage != nullptr) {
+      m_letterPage->setGap(gap);
+    }
+    if (m_symbolPage != nullptr) {
+      m_symbolPage->setGap(gap);
+    }
     for (Flex* row : m_rows) {
       if (row == nullptr) {
         continue;
       }
+      row->setGap(gap);
       row->setMinHeight(keyHeight);
       row->setMaxHeight(keyHeight);
     }
     for (Button* button : m_buttons) {
-      if (button == nullptr) {
+      if (button != nullptr) {
+        button->setControlHeight(keyHeight);
+        button->setRadius(keyRadius);
+      }
+    }
+    for (const auto& key : m_letterKeys) {
+      if (key.button == nullptr) {
         continue;
       }
-      button->setControlHeight(keyHeight);
-      button->setFontSize(fontSize);
-      button->setGlyphSize(glyphSize);
-      button->setRadius(keyRadius);
+      if (key.glyphOnly) {
+        key.button->setGlyphSize(glyphSize);
+      } else {
+        key.button->setFontSize(fontSize);
+      }
+    }
+    for (const auto& key : m_symbolKeys) {
+      if (key.button == nullptr) {
+        continue;
+      }
+      if (key.glyphOnly) {
+        key.button->setGlyphSize(glyphSize);
+      } else {
+        key.button->setFontSize(fontSize);
+      }
     }
 
     m_panel->arrange(renderer, LayoutRect{x, y, width, height});

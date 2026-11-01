@@ -1316,6 +1316,7 @@ if build_tests
     'launcher_category_state',
     'location_service',
     'lockscreen_session_actions',
+    'lockscreen_virtual_keyboard',
     'log',
     'math_provider',
     'monitor_selector',
